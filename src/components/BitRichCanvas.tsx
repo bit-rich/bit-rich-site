@@ -21,7 +21,7 @@ function BitRichModel() {
     <group ref={spinRef}>
       {/* Center auto-repositions *and* auto-scales to fit a 1-unit box */}
       <Center>
-        <primitive object={obj} />
+        <primitive object={obj as THREE.Object3D} />
       </Center>
     </group>
   )
