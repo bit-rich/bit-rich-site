@@ -76,6 +76,9 @@ function BitRichModel() {
       }
     })
 
+    // Sort by X position to distribute evenly left-to-right across letters
+    allPositions.sort((a, b) => a.x - b.x)
+
     // Pick 14 evenly spaced points (2 per letter in "BITRICH") - deterministic
     const seedPoints: THREE.Vector3[] = []
     const numSeeds = 14
