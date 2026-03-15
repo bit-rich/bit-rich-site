@@ -153,7 +153,7 @@ function BitRichModel() {
 
     // Animate the draw-in effect - much slower (~8 seconds)
     if (!animationComplete.current) {
-      drawProgress.current = Math.min(drawProgress.current + 0.002, 1)
+      drawProgress.current = Math.min(drawProgress.current + 0.0008, 1)
 
       // Ease out for smooth deceleration
       const eased = 1 - Math.pow(1 - drawProgress.current, 2)
