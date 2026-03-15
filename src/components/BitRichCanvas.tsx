@@ -68,51 +68,47 @@ function BitRichModel() {
     const numLetters = 7
     const letterWidth = (maxX - minX) / numLetters
 
-    // Build letter regions with their seed points
-    const letterRegions: { minX: number; maxX: number; seeds: THREE.Vector3[] }[] = []
+    // Build letter regions with 1 seed point each (centroid of letter)
+    const letterRegions: { minX: number; maxX: number; seed: THREE.Vector3; maxDist: number }[] = []
 
     for (let letter = 0; letter < numLetters; letter++) {
       const letterMinX = minX + letter * letterWidth
       const letterMaxX = letterMinX + letterWidth
 
-      // Get vertices in this letter's X range
-      const letterVerts = allPositions.filter(p => p.x >= letterMinX && p.x < letterMaxX)
-      const seeds: THREE.Vector3[] = []
+      // Get vertices in this letter's X range (use <= for last letter)
+      const isLast = letter === numLetters - 1
+      const letterVerts = allPositions.filter(p =>
+        p.x >= letterMinX && (isLast ? p.x <= letterMaxX : p.x < letterMaxX)
+      )
 
-      if (letterVerts.length >= 2) {
-        letterVerts.sort((a, b) => a.y - b.y)
-        const idx1 = Math.floor(letterVerts.length * 0.25)
-        const idx2 = Math.floor(letterVerts.length * 0.75)
-        seeds.push(letterVerts[idx1], letterVerts[idx2])
-      } else if (letterVerts.length === 1) {
-        seeds.push(letterVerts[0], letterVerts[0])
+      // Compute centroid as the single seed point
+      let seed: THREE.Vector3
+      if (letterVerts.length > 0) {
+        const sum = letterVerts.reduce((acc, v) => acc.add(v.clone()), new THREE.Vector3())
+        seed = sum.divideScalar(letterVerts.length)
       } else {
-        const fallback = new THREE.Vector3(letterMinX + letterWidth / 2, 0, 0)
-        seeds.push(fallback, fallback)
+        seed = new THREE.Vector3(letterMinX + letterWidth / 2, 0, 0)
       }
 
-      letterRegions.push({ minX: letterMinX, maxX: letterMaxX, seeds })
+      // Find max distance from seed to any vertex in this letter
+      let maxDist = 0
+      for (const v of letterVerts) {
+        maxDist = Math.max(maxDist, v.distanceTo(seed))
+      }
+
+      letterRegions.push({ minX: letterMinX, maxX: letterMaxX, seed, maxDist: maxDist || 1 })
     }
 
     // Function to get normalized distance (0-1) for a vertex
     const getNormalizedDist = (pos: THREE.Vector3): number => {
       // Find which letter this vertex belongs to
-      const region = letterRegions.find(r => pos.x >= r.minX && pos.x < r.maxX) || letterRegions[letterRegions.length - 1]
+      const region = letterRegions.find((r, i) => {
+        const isLast = i === letterRegions.length - 1
+        return pos.x >= r.minX && (isLast ? pos.x <= r.maxX : pos.x < r.maxX)
+      }) || letterRegions[letterRegions.length - 1]
 
-      // Get all vertices in this letter to find max distance
-      const letterVerts = allPositions.filter(p => p.x >= region.minX && p.x < region.maxX)
-
-      // Distance from this vertex to nearest seed
-      const distToSeed = Math.min(...region.seeds.map(s => pos.distanceTo(s)))
-
-      // Max distance in this letter (for normalization)
-      let maxDist = 0
-      for (const v of letterVerts) {
-        const d = Math.min(...region.seeds.map(s => v.distanceTo(s)))
-        maxDist = Math.max(maxDist, d)
-      }
-
-      return maxDist > 0 ? distToSeed / maxDist : 0
+      // Distance from seed, normalized by this letter's max distance
+      return pos.distanceTo(region.seed) / region.maxDist
     }
 
     obj.traverse((child) => {
