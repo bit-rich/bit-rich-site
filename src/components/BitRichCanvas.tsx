@@ -49,10 +49,30 @@ function BitRichModel() {
   const shaderMaterials = useMemo(() => {
     const materials: THREE.ShaderMaterial[] = []
 
-    // Deterministic hash function for consistent reveal times based on position
-    const hash = (x: number, y: number, z: number): number => {
-      const h = Math.sin(x * 12.9898 + y * 78.233 + z * 37.719) * 43758.5453
-      return h - Math.floor(h)
+    // First pass: find X bounds of the model
+    let minX = Infinity, maxX = -Infinity
+    obj.traverse((child) => {
+      if (child instanceof THREE.Line || child instanceof THREE.LineSegments || child instanceof THREE.Mesh) {
+        const geometry = child.geometry as THREE.BufferGeometry
+        const posAttr = geometry.getAttribute('position')
+        for (let i = 0; i < posAttr.count; i++) {
+          const x = posAttr.getX(i)
+          minX = Math.min(minX, x)
+          maxX = Math.max(maxX, x)
+        }
+      }
+    })
+
+    // 7 letters in "BITRICH" - assign each letter region a reveal time
+    const numLetters = 7
+    const letterWidth = (maxX - minX) / numLetters
+    // Deterministic reveal times for each letter (shuffled but consistent)
+    const letterRevealTimes = [0.1, 0.5, 0.3, 0.8, 0.2, 0.6, 0.4]
+
+    // Get reveal time based on which letter region this X falls into
+    const getRevealTime = (x: number): number => {
+      const letterIndex = Math.min(numLetters - 1, Math.floor((x - minX) / letterWidth))
+      return letterRevealTimes[letterIndex]
     }
 
     obj.traverse((child) => {
@@ -60,13 +80,10 @@ function BitRichModel() {
         const geometry = child.geometry as THREE.BufferGeometry
         const positionAttr = geometry.getAttribute('position')
 
-        // Create deterministic reveal times based on vertex position
+        // All vertices in same letter get same reveal time
         const revealTimes = new Float32Array(positionAttr.count)
         for (let i = 0; i < positionAttr.count; i++) {
-          const x = positionAttr.getX(i)
-          const y = positionAttr.getY(i)
-          const z = positionAttr.getZ(i)
-          revealTimes[i] = hash(x, y, z)
+          revealTimes[i] = getRevealTime(positionAttr.getX(i))
         }
         geometry.setAttribute('revealTime', new THREE.BufferAttribute(revealTimes, 1))
 
@@ -88,13 +105,10 @@ function BitRichModel() {
         const edges = new THREE.EdgesGeometry(child.geometry)
         const positionAttr = edges.getAttribute('position')
 
-        // Create deterministic reveal times based on vertex position
+        // All vertices in same letter get same reveal time
         const revealTimes = new Float32Array(positionAttr.count)
         for (let i = 0; i < positionAttr.count; i++) {
-          const x = positionAttr.getX(i)
-          const y = positionAttr.getY(i)
-          const z = positionAttr.getZ(i)
-          revealTimes[i] = hash(x, y, z)
+          revealTimes[i] = getRevealTime(positionAttr.getX(i))
         }
         edges.setAttribute('revealTime', new THREE.BufferAttribute(revealTimes, 1))
 
