@@ -8,12 +8,9 @@ import * as THREE from 'three'
 
 // Custom shader material that reveals lines from multiple seed points
 const drawInVertexShader = `
-  attribute float revealTime;
-  varying float vRevealTime;
   varying vec3 vPosition;
 
   void main() {
-    vRevealTime = revealTime;
     vPosition = position;
     gl_Position = projectionMatrix * modelViewMatrix * vec4(position, 1.0);
   }
@@ -22,13 +19,22 @@ const drawInVertexShader = `
 const drawInFragmentShader = `
   uniform float uProgress;
   uniform vec3 uColor;
+  uniform vec3 uSeedPoints[14];
 
-  varying float vRevealTime;
   varying vec3 vPosition;
 
   void main() {
-    // Each vertex has a deterministic reveal time - show if progress >= that time
-    if (uProgress < vRevealTime) discard;
+    // Find minimum distance to any seed point
+    float minDist = 1000.0;
+    for (int i = 0; i < 14; i++) {
+      float d = distance(vPosition, uSeedPoints[i]);
+      minDist = min(minDist, d);
+    }
+
+    // Reveal based on distance from seed points - lines "draw" outward
+    float revealRadius = uProgress * 3.0;
+
+    if (minDist > revealRadius) discard;
 
     gl_FragColor = vec4(uColor, 1.0);
   }
@@ -49,7 +55,8 @@ function BitRichModel() {
   const shaderMaterials = useMemo(() => {
     const materials: THREE.ShaderMaterial[] = []
 
-    // First pass: find X bounds of the model
+    // First pass: collect all positions and find bounds
+    const allPositions: THREE.Vector3[] = []
     let minX = Infinity, maxX = -Infinity
     obj.traverse((child) => {
       if (child instanceof THREE.Line || child instanceof THREE.LineSegments || child instanceof THREE.Mesh) {
@@ -57,40 +64,55 @@ function BitRichModel() {
         const posAttr = geometry.getAttribute('position')
         for (let i = 0; i < posAttr.count; i++) {
           const x = posAttr.getX(i)
+          const y = posAttr.getY(i)
+          const z = posAttr.getZ(i)
+          allPositions.push(new THREE.Vector3(x, y, z))
           minX = Math.min(minX, x)
           maxX = Math.max(maxX, x)
         }
       }
     })
 
-    // 7 letters in "BITRICH" - assign each letter region a reveal time
+    // 7 letters in "BITRICH" - place 2 seed points per letter (14 total)
     const numLetters = 7
     const letterWidth = (maxX - minX) / numLetters
-    // Deterministic reveal times for each letter (shuffled but consistent)
-    const letterRevealTimes = [0.1, 0.5, 0.3, 0.8, 0.2, 0.6, 0.4]
+    const seedPoints: THREE.Vector3[] = []
 
-    // Get reveal time based on which letter region this X falls into
-    const getRevealTime = (x: number): number => {
-      const letterIndex = Math.min(numLetters - 1, Math.floor((x - minX) / letterWidth))
-      return letterRevealTimes[letterIndex]
+    // For each letter region, find vertices in that region and pick 2 evenly spaced
+    for (let letter = 0; letter < numLetters; letter++) {
+      const letterMinX = minX + letter * letterWidth
+      const letterMaxX = letterMinX + letterWidth
+
+      // Get vertices in this letter's X range
+      const letterVerts = allPositions.filter(p => p.x >= letterMinX && p.x < letterMaxX)
+
+      if (letterVerts.length >= 2) {
+        // Sort by Y to get good vertical distribution
+        letterVerts.sort((a, b) => a.y - b.y)
+        // Pick one from bottom third, one from top third
+        const idx1 = Math.floor(letterVerts.length * 0.25)
+        const idx2 = Math.floor(letterVerts.length * 0.75)
+        seedPoints.push(letterVerts[idx1])
+        seedPoints.push(letterVerts[idx2])
+      } else if (letterVerts.length === 1) {
+        seedPoints.push(letterVerts[0])
+        seedPoints.push(letterVerts[0])
+      } else {
+        // Fallback
+        seedPoints.push(new THREE.Vector3(letterMinX + letterWidth / 2, 0, 0))
+        seedPoints.push(new THREE.Vector3(letterMinX + letterWidth / 2, 0, 0))
+      }
     }
 
     obj.traverse((child) => {
       if (child instanceof THREE.Line || child instanceof THREE.LineSegments) {
         const geometry = child.geometry as THREE.BufferGeometry
-        const positionAttr = geometry.getAttribute('position')
-
-        // All vertices in same letter get same reveal time
-        const revealTimes = new Float32Array(positionAttr.count)
-        for (let i = 0; i < positionAttr.count; i++) {
-          revealTimes[i] = getRevealTime(positionAttr.getX(i))
-        }
-        geometry.setAttribute('revealTime', new THREE.BufferAttribute(revealTimes, 1))
 
         const material = new THREE.ShaderMaterial({
           uniforms: {
             uProgress: { value: 0 },
             uColor: { value: new THREE.Color(0xffffff) },
+            uSeedPoints: { value: seedPoints },
           },
           vertexShader: drawInVertexShader,
           fragmentShader: drawInFragmentShader,
@@ -103,19 +125,12 @@ function BitRichModel() {
       } else if (child instanceof THREE.Mesh) {
         // Convert meshes to wireframe
         const edges = new THREE.EdgesGeometry(child.geometry)
-        const positionAttr = edges.getAttribute('position')
-
-        // All vertices in same letter get same reveal time
-        const revealTimes = new Float32Array(positionAttr.count)
-        for (let i = 0; i < positionAttr.count; i++) {
-          revealTimes[i] = getRevealTime(positionAttr.getX(i))
-        }
-        edges.setAttribute('revealTime', new THREE.BufferAttribute(revealTimes, 1))
 
         const material = new THREE.ShaderMaterial({
           uniforms: {
             uProgress: { value: 0 },
             uColor: { value: new THREE.Color(0xffffff) },
+            uSeedPoints: { value: seedPoints },
           },
           vertexShader: drawInVertexShader,
           fragmentShader: drawInFragmentShader,
