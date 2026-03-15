@@ -8,10 +8,11 @@ import * as THREE from 'three'
 
 // Custom shader material that reveals lines from multiple seed points
 const drawInVertexShader = `
-  varying vec3 vPosition;
+  attribute float normalizedDist;
+  varying float vNormalizedDist;
 
   void main() {
-    vPosition = position;
+    vNormalizedDist = normalizedDist;
     gl_Position = projectionMatrix * modelViewMatrix * vec4(position, 1.0);
   }
 `
@@ -19,22 +20,12 @@ const drawInVertexShader = `
 const drawInFragmentShader = `
   uniform float uProgress;
   uniform vec3 uColor;
-  uniform vec3 uSeedPoints[14];
 
-  varying vec3 vPosition;
+  varying float vNormalizedDist;
 
   void main() {
-    // Find minimum distance to any seed point
-    float minDist = 1000.0;
-    for (int i = 0; i < 14; i++) {
-      float d = distance(vPosition, uSeedPoints[i]);
-      minDist = min(minDist, d);
-    }
-
-    // Reveal based on distance from seed points - lines "draw" outward
-    float revealRadius = uProgress * 3.0;
-
-    if (minDist > revealRadius) discard;
+    // normalizedDist is 0-1 within each letter, so all letters finish together
+    if (vNormalizedDist > uProgress) discard;
 
     gl_FragColor = vec4(uColor, 1.0);
   }
@@ -73,46 +64,74 @@ function BitRichModel() {
       }
     })
 
-    // 7 letters in "BITRICH" - place 2 seed points per letter (14 total)
+    // 7 letters in "BITRICH" - place 2 seed points per letter
     const numLetters = 7
     const letterWidth = (maxX - minX) / numLetters
-    const seedPoints: THREE.Vector3[] = []
 
-    // For each letter region, find vertices in that region and pick 2 evenly spaced
+    // Build letter regions with their seed points
+    const letterRegions: { minX: number; maxX: number; seeds: THREE.Vector3[] }[] = []
+
     for (let letter = 0; letter < numLetters; letter++) {
       const letterMinX = minX + letter * letterWidth
       const letterMaxX = letterMinX + letterWidth
 
       // Get vertices in this letter's X range
       const letterVerts = allPositions.filter(p => p.x >= letterMinX && p.x < letterMaxX)
+      const seeds: THREE.Vector3[] = []
 
       if (letterVerts.length >= 2) {
-        // Sort by Y to get good vertical distribution
         letterVerts.sort((a, b) => a.y - b.y)
-        // Pick one from bottom third, one from top third
         const idx1 = Math.floor(letterVerts.length * 0.25)
         const idx2 = Math.floor(letterVerts.length * 0.75)
-        seedPoints.push(letterVerts[idx1])
-        seedPoints.push(letterVerts[idx2])
+        seeds.push(letterVerts[idx1], letterVerts[idx2])
       } else if (letterVerts.length === 1) {
-        seedPoints.push(letterVerts[0])
-        seedPoints.push(letterVerts[0])
+        seeds.push(letterVerts[0], letterVerts[0])
       } else {
-        // Fallback
-        seedPoints.push(new THREE.Vector3(letterMinX + letterWidth / 2, 0, 0))
-        seedPoints.push(new THREE.Vector3(letterMinX + letterWidth / 2, 0, 0))
+        const fallback = new THREE.Vector3(letterMinX + letterWidth / 2, 0, 0)
+        seeds.push(fallback, fallback)
       }
+
+      letterRegions.push({ minX: letterMinX, maxX: letterMaxX, seeds })
+    }
+
+    // Function to get normalized distance (0-1) for a vertex
+    const getNormalizedDist = (pos: THREE.Vector3): number => {
+      // Find which letter this vertex belongs to
+      const region = letterRegions.find(r => pos.x >= r.minX && pos.x < r.maxX) || letterRegions[letterRegions.length - 1]
+
+      // Get all vertices in this letter to find max distance
+      const letterVerts = allPositions.filter(p => p.x >= region.minX && p.x < region.maxX)
+
+      // Distance from this vertex to nearest seed
+      const distToSeed = Math.min(...region.seeds.map(s => pos.distanceTo(s)))
+
+      // Max distance in this letter (for normalization)
+      let maxDist = 0
+      for (const v of letterVerts) {
+        const d = Math.min(...region.seeds.map(s => v.distanceTo(s)))
+        maxDist = Math.max(maxDist, d)
+      }
+
+      return maxDist > 0 ? distToSeed / maxDist : 0
     }
 
     obj.traverse((child) => {
       if (child instanceof THREE.Line || child instanceof THREE.LineSegments) {
         const geometry = child.geometry as THREE.BufferGeometry
+        const posAttr = geometry.getAttribute('position')
+
+        // Compute normalized distance for each vertex
+        const normalizedDists = new Float32Array(posAttr.count)
+        for (let i = 0; i < posAttr.count; i++) {
+          const pos = new THREE.Vector3(posAttr.getX(i), posAttr.getY(i), posAttr.getZ(i))
+          normalizedDists[i] = getNormalizedDist(pos)
+        }
+        geometry.setAttribute('normalizedDist', new THREE.BufferAttribute(normalizedDists, 1))
 
         const material = new THREE.ShaderMaterial({
           uniforms: {
             uProgress: { value: 0 },
             uColor: { value: new THREE.Color(0xffffff) },
-            uSeedPoints: { value: seedPoints },
           },
           vertexShader: drawInVertexShader,
           fragmentShader: drawInFragmentShader,
@@ -125,12 +144,20 @@ function BitRichModel() {
       } else if (child instanceof THREE.Mesh) {
         // Convert meshes to wireframe
         const edges = new THREE.EdgesGeometry(child.geometry)
+        const posAttr = edges.getAttribute('position')
+
+        // Compute normalized distance for each vertex
+        const normalizedDists = new Float32Array(posAttr.count)
+        for (let i = 0; i < posAttr.count; i++) {
+          const pos = new THREE.Vector3(posAttr.getX(i), posAttr.getY(i), posAttr.getZ(i))
+          normalizedDists[i] = getNormalizedDist(pos)
+        }
+        edges.setAttribute('normalizedDist', new THREE.BufferAttribute(normalizedDists, 1))
 
         const material = new THREE.ShaderMaterial({
           uniforms: {
             uProgress: { value: 0 },
             uColor: { value: new THREE.Color(0xffffff) },
-            uSeedPoints: { value: seedPoints },
           },
           vertexShader: drawInVertexShader,
           fragmentShader: drawInFragmentShader,
