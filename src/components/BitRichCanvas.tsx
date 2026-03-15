@@ -6,61 +6,128 @@ import { OBJLoader } from 'three/examples/jsm/loaders/OBJLoader'
 import { useRef, useMemo } from 'react'
 import * as THREE from 'three'
 
+// Custom shader material that reveals lines from multiple seed points
+const drawInVertexShader = `
+  attribute float randomSeed;
+  varying float vRandomSeed;
+  varying vec3 vPosition;
+
+  void main() {
+    vRandomSeed = randomSeed;
+    vPosition = position;
+    gl_Position = projectionMatrix * modelViewMatrix * vec4(position, 1.0);
+  }
+`
+
+const drawInFragmentShader = `
+  uniform float uProgress;
+  uniform vec3 uColor;
+  uniform vec3 uSeedPoints[8];
+
+  varying float vRandomSeed;
+  varying vec3 vPosition;
+
+  void main() {
+    // Find minimum distance to any seed point
+    float minDist = 1000.0;
+    for (int i = 0; i < 8; i++) {
+      float d = distance(vPosition, uSeedPoints[i]);
+      minDist = min(minDist, d);
+    }
+
+    // Reveal based on distance from seed points + some randomness
+    float revealRadius = uProgress * 5.0; // Max radius to reveal
+    float edgeSoftness = 0.3;
+
+    // Add per-vertex randomness for organic feel
+    float randomOffset = vRandomSeed * 0.5;
+    float threshold = revealRadius + randomOffset;
+
+    float alpha = smoothstep(threshold - edgeSoftness, threshold, minDist);
+    alpha = 1.0 - alpha;
+
+    if (alpha < 0.01) discard;
+
+    gl_FragColor = vec4(uColor, alpha);
+  }
+`
+
 function BitRichModel() {
   const groupRef = useRef<THREE.Group>(null)
   const obj = useLoader(OBJLoader, '/bitrich_wireframe.obj') as THREE.Object3D
   const drawProgress = useRef(0)
   const animationComplete = useRef(false)
 
-  // Create line materials with dash animation for the "draw in" effect
-  const lineMaterials = useMemo(() => {
-    const materials: THREE.LineDashedMaterial[] = []
+  // Create shader materials for the draw-in effect
+  const shaderMaterials = useMemo(() => {
+    const materials: THREE.ShaderMaterial[] = []
+
+    // Generate random seed points spread across the model
+    const seedPoints = [
+      new THREE.Vector3(0, 0, 0),
+      new THREE.Vector3(1.5, 1, 0.5),
+      new THREE.Vector3(-1.5, -0.5, 0.3),
+      new THREE.Vector3(0.5, -1.5, -0.5),
+      new THREE.Vector3(-0.8, 1.2, -0.3),
+      new THREE.Vector3(1, -1, 1),
+      new THREE.Vector3(-1, 0.5, -1),
+      new THREE.Vector3(0, 1.5, 0.8),
+    ]
 
     obj.traverse((child) => {
       if (child instanceof THREE.Line || child instanceof THREE.LineSegments) {
-        // Compute line distances for dashing
-        child.computeLineDistances()
-
-        // Get total length of the line
         const geometry = child.geometry as THREE.BufferGeometry
-        const lineDistances = geometry.getAttribute('lineDistance')
-        const totalLength = lineDistances ? lineDistances.array[lineDistances.count - 1] as number : 100
 
-        // Create dashed material
-        const material = new THREE.LineDashedMaterial({
-          color: 0xffffff,
-          dashSize: totalLength,
-          gapSize: totalLength,
-          scale: 1,
+        // Add random seed attribute for per-vertex variation
+        const positionAttr = geometry.getAttribute('position')
+        const randomSeeds = new Float32Array(positionAttr.count)
+        for (let i = 0; i < positionAttr.count; i++) {
+          randomSeeds[i] = Math.random()
+        }
+        geometry.setAttribute('randomSeed', new THREE.BufferAttribute(randomSeeds, 1))
+
+        const material = new THREE.ShaderMaterial({
+          uniforms: {
+            uProgress: { value: 0 },
+            uColor: { value: new THREE.Color(0xffffff) },
+            uSeedPoints: { value: seedPoints },
+          },
+          vertexShader: drawInVertexShader,
+          fragmentShader: drawInFragmentShader,
+          transparent: true,
+          depthWrite: false,
         })
-
-        // Store original material info and total length
-        ;(material as THREE.LineDashedMaterial & { totalLength: number }).totalLength = totalLength
 
         child.material = material
         materials.push(material)
       } else if (child instanceof THREE.Mesh) {
-        // Convert meshes to wireframe with dashed lines
+        // Convert meshes to wireframe
         const edges = new THREE.EdgesGeometry(child.geometry)
-        const lineMat = new THREE.LineDashedMaterial({
-          color: 0xffffff,
-          dashSize: 0,
-          gapSize: 1000,
-          scale: 1,
+
+        // Add random seed attribute
+        const positionAttr = edges.getAttribute('position')
+        const randomSeeds = new Float32Array(positionAttr.count)
+        for (let i = 0; i < positionAttr.count; i++) {
+          randomSeeds[i] = Math.random()
+        }
+        edges.setAttribute('randomSeed', new THREE.BufferAttribute(randomSeeds, 1))
+
+        const material = new THREE.ShaderMaterial({
+          uniforms: {
+            uProgress: { value: 0 },
+            uColor: { value: new THREE.Color(0xffffff) },
+            uSeedPoints: { value: seedPoints },
+          },
+          vertexShader: drawInVertexShader,
+          fragmentShader: drawInFragmentShader,
+          transparent: true,
+          depthWrite: false,
         })
-        const lineSegments = new THREE.LineSegments(edges, lineMat)
-        lineSegments.computeLineDistances()
 
-        // Get total length
-        const lineDistances = lineSegments.geometry.getAttribute('lineDistance')
-        const totalLength = lineDistances ? lineDistances.array[lineDistances.count - 1] as number : 100
-        ;(lineMat as THREE.LineDashedMaterial & { totalLength: number }).totalLength = totalLength
-        lineMat.dashSize = totalLength
-        lineMat.gapSize = totalLength
-
+        const lineSegments = new THREE.LineSegments(edges, material)
         child.parent?.add(lineSegments)
         child.visible = false
-        materials.push(lineMat)
+        materials.push(material)
       }
     })
 
@@ -71,17 +138,15 @@ function BitRichModel() {
     const g = groupRef.current
     if (!g) return
 
-    // Animate the draw-in effect over 2 seconds
+    // Animate the draw-in effect - much slower (~8 seconds)
     if (!animationComplete.current) {
-      drawProgress.current = Math.min(drawProgress.current + 0.008, 1)
+      drawProgress.current = Math.min(drawProgress.current + 0.002, 1)
 
-      // Ease out cubic for smooth deceleration
-      const eased = 1 - Math.pow(1 - drawProgress.current, 3)
+      // Ease out for smooth deceleration
+      const eased = 1 - Math.pow(1 - drawProgress.current, 2)
 
-      lineMaterials.forEach((mat) => {
-        const totalLength = (mat as THREE.LineDashedMaterial & { totalLength: number }).totalLength || 100
-        mat.dashSize = totalLength * eased
-        mat.gapSize = totalLength * (1 - eased)
+      shaderMaterials.forEach((mat) => {
+        mat.uniforms.uProgress.value = eased
       })
 
       if (drawProgress.current >= 1) {
