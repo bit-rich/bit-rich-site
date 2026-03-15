@@ -22,7 +22,7 @@ const drawInVertexShader = `
 const drawInFragmentShader = `
   uniform float uProgress;
   uniform vec3 uColor;
-  uniform vec3 uSeedPoints[8];
+  uniform vec3 uSeedPoints[30];
 
   varying float vRandomSeed;
   varying vec3 vPosition;
@@ -30,25 +30,18 @@ const drawInFragmentShader = `
   void main() {
     // Find minimum distance to any seed point
     float minDist = 1000.0;
-    for (int i = 0; i < 8; i++) {
+    for (int i = 0; i < 30; i++) {
       float d = distance(vPosition, uSeedPoints[i]);
       minDist = min(minDist, d);
     }
 
-    // Reveal based on distance from seed points + some randomness
-    float revealRadius = uProgress * 5.0; // Max radius to reveal
-    float edgeSoftness = 0.3;
+    // Reveal based on distance from seed points
+    float revealRadius = uProgress * 3.0;
 
-    // Add per-vertex randomness for organic feel
-    float randomOffset = vRandomSeed * 0.5;
-    float threshold = revealRadius + randomOffset;
+    // Hard cutoff - no smoothness, just on/off based on distance
+    if (minDist > revealRadius) discard;
 
-    float alpha = smoothstep(threshold - edgeSoftness, threshold, minDist);
-    alpha = 1.0 - alpha;
-
-    if (alpha < 0.01) discard;
-
-    gl_FragColor = vec4(uColor, alpha);
+    gl_FragColor = vec4(uColor, 1.0);
   }
 `
 
@@ -62,17 +55,37 @@ function BitRichModel() {
   const shaderMaterials = useMemo(() => {
     const materials: THREE.ShaderMaterial[] = []
 
-    // Generate random seed points spread across the model
-    const seedPoints = [
-      new THREE.Vector3(0, 0, 0),
-      new THREE.Vector3(1.5, 1, 0.5),
-      new THREE.Vector3(-1.5, -0.5, 0.3),
-      new THREE.Vector3(0.5, -1.5, -0.5),
-      new THREE.Vector3(-0.8, 1.2, -0.3),
-      new THREE.Vector3(1, -1, 1),
-      new THREE.Vector3(-1, 0.5, -1),
-      new THREE.Vector3(0, 1.5, 0.8),
-    ]
+    // Sample seed points directly from the model's geometry
+    const allPositions: THREE.Vector3[] = []
+    obj.traverse((child) => {
+      if (child instanceof THREE.Line || child instanceof THREE.LineSegments || child instanceof THREE.Mesh) {
+        const geometry = child.geometry as THREE.BufferGeometry
+        const posAttr = geometry.getAttribute('position')
+        for (let i = 0; i < posAttr.count; i++) {
+          allPositions.push(new THREE.Vector3(
+            posAttr.getX(i),
+            posAttr.getY(i),
+            posAttr.getZ(i)
+          ))
+        }
+      }
+    })
+
+    // Pick ~30 random points from the actual geometry as seeds
+    const seedPoints: THREE.Vector3[] = []
+    const numSeeds = Math.min(30, allPositions.length)
+    const usedIndices = new Set<number>()
+    while (seedPoints.length < numSeeds && usedIndices.size < allPositions.length) {
+      const idx = Math.floor(Math.random() * allPositions.length)
+      if (!usedIndices.has(idx)) {
+        usedIndices.add(idx)
+        seedPoints.push(allPositions[idx])
+      }
+    }
+    // Pad to 30 if needed
+    while (seedPoints.length < 30) {
+      seedPoints.push(new THREE.Vector3(0, 0, 0))
+    }
 
     obj.traverse((child) => {
       if (child instanceof THREE.Line || child instanceof THREE.LineSegments) {
