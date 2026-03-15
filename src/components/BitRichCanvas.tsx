@@ -8,12 +8,12 @@ import * as THREE from 'three'
 
 // Custom shader material that reveals lines from multiple seed points
 const drawInVertexShader = `
-  attribute float randomSeed;
-  varying float vRandomSeed;
+  attribute float revealTime;
+  varying float vRevealTime;
   varying vec3 vPosition;
 
   void main() {
-    vRandomSeed = randomSeed;
+    vRevealTime = revealTime;
     vPosition = position;
     gl_Position = projectionMatrix * modelViewMatrix * vec4(position, 1.0);
   }
@@ -22,24 +22,13 @@ const drawInVertexShader = `
 const drawInFragmentShader = `
   uniform float uProgress;
   uniform vec3 uColor;
-  uniform vec3 uSeedPoints[14];
 
-  varying float vRandomSeed;
+  varying float vRevealTime;
   varying vec3 vPosition;
 
   void main() {
-    // Find minimum distance to any seed point
-    float minDist = 1000.0;
-    for (int i = 0; i < 14; i++) {
-      float d = distance(vPosition, uSeedPoints[i]);
-      minDist = min(minDist, d);
-    }
-
-    // Reveal based on distance from seed points
-    float revealRadius = uProgress * 3.0;
-
-    // Hard cutoff - no smoothness, just on/off based on distance
-    if (minDist > revealRadius) discard;
+    // Each vertex has a deterministic reveal time - show if progress >= that time
+    if (uProgress < vRevealTime) discard;
 
     gl_FragColor = vec4(uColor, 1.0);
   }
@@ -60,57 +49,31 @@ function BitRichModel() {
   const shaderMaterials = useMemo(() => {
     const materials: THREE.ShaderMaterial[] = []
 
-    // Sample seed points directly from the model's geometry - deterministic, evenly spaced
-    const allPositions: THREE.Vector3[] = []
-    obj.traverse((child) => {
-      if (child instanceof THREE.Line || child instanceof THREE.LineSegments || child instanceof THREE.Mesh) {
-        const geometry = child.geometry as THREE.BufferGeometry
-        const posAttr = geometry.getAttribute('position')
-        for (let i = 0; i < posAttr.count; i++) {
-          allPositions.push(new THREE.Vector3(
-            posAttr.getX(i),
-            posAttr.getY(i),
-            posAttr.getZ(i)
-          ))
-        }
-      }
-    })
-
-    // Sort by X position to distribute evenly left-to-right across letters
-    allPositions.sort((a, b) => a.x - b.x)
-
-    // Pick 14 evenly spaced points (2 per letter in "BITRICH") - deterministic
-    const seedPoints: THREE.Vector3[] = []
-    const numSeeds = 14
-    if (allPositions.length > 0) {
-      const step = allPositions.length / numSeeds
-      for (let i = 0; i < numSeeds; i++) {
-        const idx = Math.floor(i * step)
-        seedPoints.push(allPositions[idx])
-      }
-    }
-    // Pad to 14 if needed
-    while (seedPoints.length < 14) {
-      seedPoints.push(new THREE.Vector3(0, 0, 0))
+    // Deterministic hash function for consistent reveal times based on position
+    const hash = (x: number, y: number, z: number): number => {
+      const h = Math.sin(x * 12.9898 + y * 78.233 + z * 37.719) * 43758.5453
+      return h - Math.floor(h)
     }
 
     obj.traverse((child) => {
       if (child instanceof THREE.Line || child instanceof THREE.LineSegments) {
         const geometry = child.geometry as THREE.BufferGeometry
-
-        // Add random seed attribute for per-vertex variation
         const positionAttr = geometry.getAttribute('position')
-        const randomSeeds = new Float32Array(positionAttr.count)
+
+        // Create deterministic reveal times based on vertex position
+        const revealTimes = new Float32Array(positionAttr.count)
         for (let i = 0; i < positionAttr.count; i++) {
-          randomSeeds[i] = Math.random()
+          const x = positionAttr.getX(i)
+          const y = positionAttr.getY(i)
+          const z = positionAttr.getZ(i)
+          revealTimes[i] = hash(x, y, z)
         }
-        geometry.setAttribute('randomSeed', new THREE.BufferAttribute(randomSeeds, 1))
+        geometry.setAttribute('revealTime', new THREE.BufferAttribute(revealTimes, 1))
 
         const material = new THREE.ShaderMaterial({
           uniforms: {
             uProgress: { value: 0 },
             uColor: { value: new THREE.Color(0xffffff) },
-            uSeedPoints: { value: seedPoints },
           },
           vertexShader: drawInVertexShader,
           fragmentShader: drawInFragmentShader,
@@ -123,20 +86,22 @@ function BitRichModel() {
       } else if (child instanceof THREE.Mesh) {
         // Convert meshes to wireframe
         const edges = new THREE.EdgesGeometry(child.geometry)
-
-        // Add random seed attribute
         const positionAttr = edges.getAttribute('position')
-        const randomSeeds = new Float32Array(positionAttr.count)
+
+        // Create deterministic reveal times based on vertex position
+        const revealTimes = new Float32Array(positionAttr.count)
         for (let i = 0; i < positionAttr.count; i++) {
-          randomSeeds[i] = Math.random()
+          const x = positionAttr.getX(i)
+          const y = positionAttr.getY(i)
+          const z = positionAttr.getZ(i)
+          revealTimes[i] = hash(x, y, z)
         }
-        edges.setAttribute('randomSeed', new THREE.BufferAttribute(randomSeeds, 1))
+        edges.setAttribute('revealTime', new THREE.BufferAttribute(revealTimes, 1))
 
         const material = new THREE.ShaderMaterial({
           uniforms: {
             uProgress: { value: 0 },
             uColor: { value: new THREE.Color(0xffffff) },
-            uSeedPoints: { value: seedPoints },
           },
           vertexShader: drawInVertexShader,
           fragmentShader: drawInFragmentShader,
