@@ -22,7 +22,7 @@ const drawInVertexShader = `
 const drawInFragmentShader = `
   uniform float uProgress;
   uniform vec3 uColor;
-  uniform vec3 uSeedPoints[30];
+  uniform vec3 uSeedPoints[14];
 
   varying float vRandomSeed;
   varying vec3 vPosition;
@@ -30,7 +30,7 @@ const drawInFragmentShader = `
   void main() {
     // Find minimum distance to any seed point
     float minDist = 1000.0;
-    for (int i = 0; i < 30; i++) {
+    for (int i = 0; i < 14; i++) {
       float d = distance(vPosition, uSeedPoints[i]);
       minDist = min(minDist, d);
     }
@@ -45,17 +45,22 @@ const drawInFragmentShader = `
   }
 `
 
+// Initial rotation to show 3D depth
+const INITIAL_ROTATION_X = Math.PI * 0.08
+const INITIAL_ROTATION_Y = Math.PI * 0.15
+
 function BitRichModel() {
   const groupRef = useRef<THREE.Group>(null)
   const obj = useLoader(OBJLoader, '/bitrich_wireframe.obj') as THREE.Object3D
   const drawProgress = useRef(0)
   const animationComplete = useRef(false)
+  const initialized = useRef(false)
 
   // Create shader materials for the draw-in effect
   const shaderMaterials = useMemo(() => {
     const materials: THREE.ShaderMaterial[] = []
 
-    // Sample seed points directly from the model's geometry
+    // Sample seed points directly from the model's geometry - deterministic, evenly spaced
     const allPositions: THREE.Vector3[] = []
     obj.traverse((child) => {
       if (child instanceof THREE.Line || child instanceof THREE.LineSegments || child instanceof THREE.Mesh) {
@@ -71,19 +76,18 @@ function BitRichModel() {
       }
     })
 
-    // Pick ~30 random points from the actual geometry as seeds
+    // Pick 14 evenly spaced points (2 per letter in "BITRICH") - deterministic
     const seedPoints: THREE.Vector3[] = []
-    const numSeeds = Math.min(30, allPositions.length)
-    const usedIndices = new Set<number>()
-    while (seedPoints.length < numSeeds && usedIndices.size < allPositions.length) {
-      const idx = Math.floor(Math.random() * allPositions.length)
-      if (!usedIndices.has(idx)) {
-        usedIndices.add(idx)
+    const numSeeds = 14
+    if (allPositions.length > 0) {
+      const step = allPositions.length / numSeeds
+      for (let i = 0; i < numSeeds; i++) {
+        const idx = Math.floor(i * step)
         seedPoints.push(allPositions[idx])
       }
     }
-    // Pad to 30 if needed
-    while (seedPoints.length < 30) {
+    // Pad to 14 if needed
+    while (seedPoints.length < 14) {
       seedPoints.push(new THREE.Vector3(0, 0, 0))
     }
 
@@ -151,6 +155,13 @@ function BitRichModel() {
     const g = groupRef.current
     if (!g) return
 
+    // Set initial rotation on first frame
+    if (!initialized.current) {
+      g.rotation.x = INITIAL_ROTATION_X
+      g.rotation.y = INITIAL_ROTATION_Y
+      initialized.current = true
+    }
+
     // Animate the draw-in effect - much slower (~8 seconds)
     if (!animationComplete.current) {
       drawProgress.current = Math.min(drawProgress.current + 0.0008, 1)
@@ -167,16 +178,17 @@ function BitRichModel() {
       }
     }
 
-    const targetX = mouse.y * Math.PI * 0.1
-    const targetY = -mouse.x * Math.PI * 0.1
+    // Mouse offset from initial rotation
+    const targetX = INITIAL_ROTATION_X + mouse.y * Math.PI * 0.1
+    const targetY = INITIAL_ROTATION_Y - mouse.x * Math.PI * 0.1
 
     // Lerp to target
     g.rotation.x += (targetX - g.rotation.x) * 0.05
     g.rotation.y += (targetY - g.rotation.y) * 0.05
 
-    // Clamp rotations
-    g.rotation.x = Math.max(-Math.PI / 6, Math.min(Math.PI / 6, g.rotation.x))
-    g.rotation.y = Math.max(-Math.PI / 4, Math.min(Math.PI / 4, g.rotation.y))
+    // Clamp rotations around the initial angle
+    g.rotation.x = Math.max(INITIAL_ROTATION_X - Math.PI / 6, Math.min(INITIAL_ROTATION_X + Math.PI / 6, g.rotation.x))
+    g.rotation.y = Math.max(INITIAL_ROTATION_Y - Math.PI / 4, Math.min(INITIAL_ROTATION_Y + Math.PI / 4, g.rotation.y))
   })
 
   return (
