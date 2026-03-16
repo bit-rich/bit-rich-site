@@ -29,32 +29,45 @@ const fragmentShader = `
   }
 `
 
-function BitRichModel({ speedRef }: { speedRef: React.MutableRefObject<number> }) {
-  const groupRef = useRef<THREE.Group>(null)
-  const obj = useLoader(OBJLoader, '/bitrich_wireframe.obj') as THREE.Object3D
-  const progress = useRef(0)
-  const initialized = useRef(false)
+type LetterRegion = { minX: number; maxX: number; seed: THREE.Vector3; maxDist: number; mat: THREE.ShaderMaterial }
 
-  const material = useMemo(() => {
-    let seed: THREE.Vector3 | null = null
-    let maxDist = 0
+function buildLetterRegions(allPositions: THREE.Vector3[]): LetterRegion[] {
+  // Sort all X values and find gaps between letters
+  const sortedX = allPositions.map(p => p.x).sort((a, b) => a - b)
 
-    obj.traverse((child) => {
-      if (child instanceof THREE.Line || child instanceof THREE.LineSegments || child instanceof THREE.Mesh) {
-        const posAttr = (child.geometry as THREE.BufferGeometry).getAttribute('position')
-        for (let i = 0; i < posAttr.count; i++) {
-          const v = new THREE.Vector3(posAttr.getX(i), posAttr.getY(i), posAttr.getZ(i))
-          if (!seed) seed = v.clone()
-          maxDist = Math.max(maxDist, v.distanceTo(seed))
-        }
-      }
-    })
+  const gaps: { pos: number; size: number }[] = []
+  for (let i = 1; i < sortedX.length; i++) {
+    const size = sortedX[i] - sortedX[i - 1]
+    if (size > 0) gaps.push({ pos: (sortedX[i] + sortedX[i - 1]) / 2, size })
+  }
+
+  // Letter gaps are much larger than within-letter gaps
+  const meanGap = gaps.reduce((s, g) => s + g.size, 0) / gaps.length
+  const separators = gaps
+    .filter(g => g.size > meanGap * 5)
+    .map(g => g.pos)
+    .sort((a, b) => a - b)
+
+  // Build X ranges for each letter
+  const bounds = [
+    -Infinity,
+    ...separators,
+    Infinity,
+  ]
+
+  return bounds.slice(0, -1).map((minX, i) => {
+    const maxX = bounds[i + 1]
+    const verts = allPositions.filter(p => p.x > minX && p.x <= maxX)
+
+    // First vertex as seed
+    const seed = verts[0]?.clone() ?? new THREE.Vector3()
+    const maxDist = verts.reduce((m, v) => Math.max(m, v.distanceTo(seed)), 0) || 1
 
     const mat = new THREE.ShaderMaterial({
       uniforms: {
         uProgress: { value: 0 },
-        uSeed: { value: seed ?? new THREE.Vector3() },
-        uMaxDist: { value: maxDist || 1 },
+        uSeed: { value: seed },
+        uMaxDist: { value: maxDist },
       },
       vertexShader,
       fragmentShader,
@@ -62,17 +75,54 @@ function BitRichModel({ speedRef }: { speedRef: React.MutableRefObject<number> }
       depthWrite: false,
     })
 
+    return { minX, maxX, seed, maxDist, mat }
+  })
+}
+
+function BitRichModel({ speedsRef }: { speedsRef: React.MutableRefObject<number[]> }) {
+  const groupRef = useRef<THREE.Group>(null)
+  const obj = useLoader(OBJLoader, '/bitrich_wireframe.obj') as THREE.Object3D
+  const initialized = useRef(false)
+  const letterProgress = useRef<number[]>([])
+
+  const regions = useMemo(() => {
+    // Collect all vertex positions
+    const allPositions: THREE.Vector3[] = []
+    obj.traverse((child) => {
+      if (child instanceof THREE.Line || child instanceof THREE.LineSegments || child instanceof THREE.Mesh) {
+        const posAttr = (child.geometry as THREE.BufferGeometry).getAttribute('position')
+        for (let i = 0; i < posAttr.count; i++) {
+          allPositions.push(new THREE.Vector3(posAttr.getX(i), posAttr.getY(i), posAttr.getZ(i)))
+        }
+      }
+    })
+
+    const regions = buildLetterRegions(allPositions)
+    letterProgress.current = new Array(regions.length).fill(0)
+
+    const getMat = (centroidX: number) => {
+      const r = regions.find(r => centroidX > r.minX && centroidX <= r.maxX)
+      return r?.mat ?? regions[regions.length - 1].mat
+    }
+
     obj.traverse((child) => {
       if (child instanceof THREE.Line || child instanceof THREE.LineSegments) {
-        child.material = mat
+        const posAttr = (child.geometry as THREE.BufferGeometry).getAttribute('position')
+        let cx = 0
+        for (let i = 0; i < posAttr.count; i++) cx += posAttr.getX(i)
+        child.material = getMat(cx / posAttr.count)
       } else if (child instanceof THREE.Mesh) {
-        const lineSegs = new THREE.LineSegments(new THREE.EdgesGeometry(child.geometry), mat)
+        const edges = new THREE.EdgesGeometry(child.geometry)
+        const posAttr = edges.getAttribute('position')
+        let cx = 0
+        for (let i = 0; i < posAttr.count; i++) cx += posAttr.getX(i)
+        const lineSegs = new THREE.LineSegments(edges, getMat(cx / posAttr.count))
         child.parent?.add(lineSegs)
         child.visible = false
       }
     })
 
-    return mat
+    return regions
   }, [obj])
 
   useFrame(() => {
@@ -85,8 +135,11 @@ function BitRichModel({ speedRef }: { speedRef: React.MutableRefObject<number> }
       initialized.current = true
     }
 
-    progress.current = Math.min(progress.current + speedRef.current, 1)
-    material.uniforms.uProgress.value = progress.current
+    regions.forEach((r, i) => {
+      const speed = speedsRef.current[i] ?? speedsRef.current[0]
+      letterProgress.current[i] = Math.min(letterProgress.current[i] + speed, 1)
+      r.mat.uniforms.uProgress.value = letterProgress.current[i]
+    })
   })
 
   return (
@@ -99,30 +152,38 @@ function BitRichModel({ speedRef }: { speedRef: React.MutableRefObject<number> }
 }
 
 export default function BitRichCanvas() {
-  const [speed, setSpeed] = useState(DEFAULT_SPEED)
-  const speedRef = useRef(speed)
-  speedRef.current = speed
+  const [speeds, setSpeeds] = useState<number[]>(new Array(8).fill(DEFAULT_SPEED))
+  const speedsRef = useRef(speeds)
+  speedsRef.current = speeds
 
   return (
     <div className="w-screen h-screen relative">
       <Canvas camera={{ position: [0, 0, 5] }}>
         <ambientLight intensity={0.6} />
-        <BitRichModel speedRef={speedRef} />
+        <BitRichModel speedsRef={speedsRef} />
         <OrbitControls enableZoom={false} enablePan={false} />
       </Canvas>
 
-      <div className="absolute bottom-6 left-1/2 -translate-x-1/2 flex items-center gap-3 bg-black/70 px-4 py-3 rounded text-white text-xs font-mono">
-        <span>speed</span>
-        <input
-          type="range"
-          min={0}
-          max={0.005}
-          step={0.0001}
-          value={speed}
-          onChange={e => setSpeed(parseFloat(e.target.value))}
-          className="w-40"
-        />
-        <span className="w-14 text-right tabular-nums">{speed.toFixed(4)}</span>
+      <div className="absolute bottom-6 left-1/2 -translate-x-1/2 flex flex-col gap-1.5 bg-black/70 px-4 py-3 rounded text-white text-xs font-mono">
+        {speeds.map((spd, i) => (
+          <div key={i} className="flex items-center gap-3">
+            <span className="w-4 text-center">{i + 1}</span>
+            <input
+              type="range"
+              min={0}
+              max={0.005}
+              step={0.0001}
+              value={spd}
+              onChange={e => {
+                const next = [...speeds]
+                next[i] = parseFloat(e.target.value)
+                setSpeeds(next)
+              }}
+              className="w-40"
+            />
+            <span className="w-14 text-right tabular-nums">{spd.toFixed(4)}</span>
+          </div>
+        ))}
       </div>
     </div>
   )
