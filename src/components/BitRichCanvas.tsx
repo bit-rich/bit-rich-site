@@ -1,14 +1,17 @@
 'use client'
 
 import { Canvas, useFrame, useLoader } from '@react-three/fiber'
-import { OrbitControls, Center } from '@react-three/drei'
+import { Center } from '@react-three/drei'
 import { OBJLoader } from 'three/examples/jsm/loaders/OBJLoader'
-import { useRef, useMemo } from 'react'
+import { useRef, useMemo, useEffect } from 'react'
 import * as THREE from 'three'
 
-const INITIAL_ROTATION_X = Math.PI * 0.18
-const INITIAL_ROTATION_Y = Math.PI * 0.22
-const INITIAL_SCALE = 1.4
+const INITIAL_ROTATION_X = 1.0
+const INITIAL_ROTATION_Y = 1.0
+const INITIAL_ROTATION_Z = -.40
+const SCALE_FACTOR = 0.12  // fraction of viewport height
+const OFFSET_X = 3      // margin from left edge (in units of scale)
+const OFFSET_Y = 1.2       // margin from top edge (in units of scale)
 const DEFAULT_SPEED = 0.0025
 const DEPTH_START = 0.985
 
@@ -113,7 +116,23 @@ function buildLetterObjects(obj: THREE.Object3D) {
       adj.get(b)!.push([b, a])
     }
 
-    const seedKey = edges[0][0]
+    // Sort each adjacency list: front-face neighbors first (clockwise), depth/back after
+    for (const [k, neighbors] of adj) {
+      const p = posMap.get(k)!
+      neighbors.sort(([, a], [, b]) => {
+        const pa = posMap.get(a)!, pb = posMap.get(b)!
+        const aFront = pa.z < 0.1, bFront = pb.z < 0.1
+        if (aFront && !bFront) return -1
+        if (!aFront && bFront) return 1
+        return Math.atan2(pb.y - p.y, pb.x - p.x) - Math.atan2(pa.y - p.y, pa.x - p.x)
+      })
+    }
+
+    const frontKeys = [...adj.keys()].filter(k => posMap.get(k)!.z < 0.1)
+    const seedPool = frontKeys.length > 0 ? frontKeys : [...adj.keys()]
+    const seedKey = seedPool.reduce((best, k) =>
+      (posMap.get(k)!.x - posMap.get(k)!.y) < (posMap.get(best)!.x - posMap.get(best)!.y) ? k : best
+    )
     const visitedVerts = new Set<string>([seedKey])
     const visitedEdges = new Set<string>()
     const edgeKey = (a: string, b: string) => [a, b].sort().join('|')
@@ -127,13 +146,25 @@ function buildLetterObjects(obj: THREE.Object3D) {
         visitedVerts.add(nb)
         visitedEdges.add(edgeKey(cur, nb))
         sortedEdges.push([cur, nb])
+        // immediately draw any cycle edges that just became reachable (both endpoints now visited)
+        for (const [a, b] of adj.get(nb) ?? []) {
+          if (visitedVerts.has(b) && !visitedEdges.has(edgeKey(a, b))) {
+            visitedEdges.add(edgeKey(a, b))
+            sortedEdges.push([a, b])
+          }
+        }
         stack.push(nb)
       } else {
         stack.pop()
       }
     }
-    for (const [a, b] of edges) {
-      if (!visitedEdges.has(edgeKey(a, b))) sortedEdges.push([a, b])
+
+
+    // Fix any edge whose direction is flipped relative to the previous edge's tip
+    for (let i = 1; i < sortedEdges.length; i++) {
+      const [, prevB] = sortedEdges[i - 1]
+      const [a, b] = sortedEdges[i]
+      if (a !== prevB && b === prevB) sortedEdges[i] = [b, a]
     }
 
     const seed = posMap.get(seedKey)!
@@ -210,6 +241,38 @@ function BitRichModel({ speedsRef, debugRef }: { speedsRef: React.MutableRefObje
   const obj = useLoader(OBJLoader, '/bitrich_wireframe.obj') as THREE.Object3D
   const initialized = useRef(false)
   const rawProgress = useRef<number[]>([])
+  const drag = useRef<{ x: number; y: number } | null>(null)
+
+  useEffect(() => {
+    const onDown = (e: PointerEvent) => { drag.current = { x: e.clientX, y: e.clientY } }
+    const onMove = (e: PointerEvent) => {
+      if (!drag.current || !groupRef.current) return
+      const dx = e.clientX - drag.current.x
+      const dy = e.clientY - drag.current.y
+      const g = groupRef.current
+      if (e.buttons === 2) {
+        // rotate around world Z
+        g.quaternion.premultiply(new THREE.Quaternion().setFromAxisAngle(new THREE.Vector3(0, 0, 1), dx * 0.005))
+      } else {
+        // rotate around world X and Y
+        g.quaternion.premultiply(new THREE.Quaternion().setFromAxisAngle(new THREE.Vector3(0, 1, 0), dx * 0.005))
+        g.quaternion.premultiply(new THREE.Quaternion().setFromAxisAngle(new THREE.Vector3(1, 0, 0), dy * 0.005))
+      }
+      drag.current = { x: e.clientX, y: e.clientY }
+    }
+    const onUp = () => { drag.current = null }
+    const onContextMenu = (e: MouseEvent) => e.preventDefault()
+    window.addEventListener('pointerdown', onDown)
+    window.addEventListener('pointermove', onMove)
+    window.addEventListener('pointerup', onUp)
+    window.addEventListener('contextmenu', onContextMenu)
+    return () => {
+      window.removeEventListener('pointerdown', onDown)
+      window.removeEventListener('pointermove', onMove)
+      window.removeEventListener('pointerup', onUp)
+      window.removeEventListener('contextmenu', onContextMenu)
+    }
+  }, [])
 
   const { letters, tipPoints, tipPositions } = useMemo(() => {
     const letters = buildLetterObjects(obj)
@@ -226,23 +289,23 @@ function BitRichModel({ speedsRef, debugRef }: { speedsRef: React.MutableRefObje
     return { letters, tipPoints: new THREE.Points(tipGeo, tipMat), tipPositions }
   }, [obj])
 
-  useFrame(({ viewport, camera }) => {
+  useFrame(({ viewport }) => {
     const g = groupRef.current
     if (!g) return
 
     if (!initialized.current) {
-      g.rotation.x = INITIAL_ROTATION_X
-      g.rotation.y = INITIAL_ROTATION_Y
-      g.scale.setScalar(INITIAL_SCALE)
+      g.quaternion.setFromEuler(new THREE.Euler(INITIAL_ROTATION_X, INITIAL_ROTATION_Y, INITIAL_ROTATION_Z))
       initialized.current = true
     }
 
-    g.position.set(-viewport.width * 0.08, viewport.height * 0.37, 0)
+    const scale = viewport.height * SCALE_FACTOR
+    g.scale.setScalar(scale)
+    g.position.set(-viewport.width / 2 + scale * OFFSET_X, viewport.height / 2 - scale * OFFSET_Y, 0)
 
     if (debugRef.current) {
-      const p = camera.position
-      const r = camera.rotation
-      debugRef.current.textContent = `cam pos: ${p.x.toFixed(2)}, ${p.y.toFixed(2)}, ${p.z.toFixed(2)}  |  cam rot: ${r.x.toFixed(3)}, ${r.y.toFixed(3)}, ${r.z.toFixed(3)}`
+      const e = new THREE.Euler().setFromQuaternion(g.quaternion)
+      const p = g.position
+      debugRef.current.textContent = `rx: ${e.x.toFixed(3)}  ry: ${e.y.toFixed(3)}  rz: ${e.z.toFixed(3)}  |  pos: ${p.x.toFixed(2)}, ${p.y.toFixed(2)}`
     }
 
     letters.forEach(({ mat, getTip }, i) => {
@@ -258,7 +321,7 @@ function BitRichModel({ speedsRef, debugRef }: { speedsRef: React.MutableRefObje
       tipPositions[i * 3 + 2] = tip.z
     })
 
-    ;(tipPoints.geometry.getAttribute('position') as THREE.BufferAttribute).needsUpdate = true
+      ; (tipPoints.geometry.getAttribute('position') as THREE.BufferAttribute).needsUpdate = true
   })
 
   return (
@@ -281,7 +344,6 @@ export default function BitRichCanvas() {
     <div className="w-screen h-screen">
       <Canvas camera={{ position: [0, 0, 5] }} gl={{ antialias: true }}>
         <BitRichModel speedsRef={speedsRef} debugRef={debugRef} />
-        <OrbitControls enableZoom={false} enablePan={false} />
       </Canvas>
       <div ref={debugRef} className="absolute bottom-4 left-4 text-white font-mono text-sm pointer-events-none" />
     </div>
