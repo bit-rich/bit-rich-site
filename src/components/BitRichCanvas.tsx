@@ -12,24 +12,22 @@ const INITIAL_ROTATION_X = Math.PI * 0.08
 const INITIAL_ROTATION_Y = Math.PI * 0.15
 const DEFAULT_SPEED = 0.0008
 
-const drawInVertexShader = `
-  attribute float normalizedDist;
-  varying float vNormalizedDist;
-
+const vertexShader = `
+  varying vec3 vPosition;
   void main() {
-    vNormalizedDist = normalizedDist;
+    vPosition = position;
     gl_Position = projectionMatrix * modelViewMatrix * vec4(position, 1.0);
   }
 `
 
-const drawInFragmentShader = `
+const fragmentShader = `
   uniform float uProgress;
+  uniform vec3 uSeed;
+  uniform float uMaxDist;
   uniform vec3 uColor;
-
-  varying float vNormalizedDist;
-
+  varying vec3 vPosition;
   void main() {
-    if (vNormalizedDist > uProgress) discard;
+    if (distance(vPosition, uSeed) / uMaxDist > uProgress) discard;
     gl_FragColor = vec4(uColor, 1.0);
   }
 `
@@ -40,13 +38,11 @@ function BitRichModel({ speedsRef }: { speedsRef: React.MutableRefObject<number[
   const letterProgress = useRef<number[]>(new Array(NUM_LETTERS).fill(0))
   const initialized = useRef(false)
 
-  // letterMaterials[i] = all ShaderMaterials belonging to letter i
+  // One material per letter, shared across all meshes in that letter
   const letterMaterials = useMemo(() => {
-    const result: THREE.ShaderMaterial[][] = Array.from({ length: NUM_LETTERS }, () => [])
-
-    // Collect all vertex positions and X bounds
     const allPositions: THREE.Vector3[] = []
     let minX = Infinity, maxX = -Infinity
+
     obj.traverse((child) => {
       if (child instanceof THREE.Line || child instanceof THREE.LineSegments || child instanceof THREE.Mesh) {
         const posAttr = (child.geometry as THREE.BufferGeometry).getAttribute('position')
@@ -61,81 +57,59 @@ function BitRichModel({ speedsRef }: { speedsRef: React.MutableRefObject<number[
 
     const letterWidth = (maxX - minX) / NUM_LETTERS
 
-    // Build per-letter regions with centroid seed
-    const regions = Array.from({ length: NUM_LETTERS }, (_, i) => {
+    // One material per letter with seed + maxDist uniforms
+    const materials = Array.from({ length: NUM_LETTERS }, (_, i) => {
       const rMinX = minX + i * letterWidth
       const rMaxX = rMinX + letterWidth
       const isLast = i === NUM_LETTERS - 1
       const verts = allPositions.filter(p => p.x >= rMinX && (isLast ? p.x <= rMaxX : p.x < rMaxX))
 
-      let seed: THREE.Vector3
+      let seed = new THREE.Vector3(rMinX + letterWidth / 2, 0, 0)
       if (verts.length > 0) {
         const sum = verts.reduce((acc, v) => acc.add(v.clone()), new THREE.Vector3())
         seed = sum.divideScalar(verts.length)
-      } else {
-        seed = new THREE.Vector3(rMinX + letterWidth / 2, 0, 0)
       }
 
       const maxDist = verts.reduce((m, v) => Math.max(m, v.distanceTo(seed)), 0) || 1
-      return { minX: rMinX, maxX: rMaxX, seed, maxDist, isLast }
+
+      return new THREE.ShaderMaterial({
+        uniforms: {
+          uProgress: { value: 0 },
+          uSeed: { value: seed },
+          uMaxDist: { value: maxDist },
+          uColor: { value: new THREE.Color(0xffffff) },
+        },
+        vertexShader,
+        fragmentShader,
+        transparent: true,
+        depthWrite: false,
+      })
     })
 
-    // Assign vertex x to letter index
-    const getLetterIdx = (x: number) => {
-      for (let i = 0; i < NUM_LETTERS; i++) {
-        const r = regions[i]
-        if (x >= r.minX && (r.isLast ? x <= r.maxX : x < r.maxX)) return i
-      }
-      return NUM_LETTERS - 1
+    // Assign each mesh to a letter by its centroid X
+    const getLetterIdx = (centroidX: number) => {
+      const i = Math.floor((centroidX - minX) / letterWidth)
+      return Math.max(0, Math.min(NUM_LETTERS - 1, i))
     }
-
-    // Compute normalizedDist per vertex; assign geometry to letter by centroid
-    const prepareGeometry = (geometry: THREE.BufferGeometry): number => {
-      const posAttr = geometry.getAttribute('position')
-      let centroidX = 0
-      for (let i = 0; i < posAttr.count; i++) centroidX += posAttr.getX(i)
-      centroidX /= posAttr.count
-      const letterIdx = getLetterIdx(centroidX)
-      const region = regions[letterIdx]
-
-      const normalizedDists = new Float32Array(posAttr.count)
-      for (let i = 0; i < posAttr.count; i++) {
-        const pos = new THREE.Vector3(posAttr.getX(i), posAttr.getY(i), posAttr.getZ(i))
-        normalizedDists[i] = pos.distanceTo(region.seed) / region.maxDist
-      }
-      geometry.setAttribute('normalizedDist', new THREE.BufferAttribute(normalizedDists, 1))
-      return letterIdx
-    }
-
-    const makeMaterial = () => new THREE.ShaderMaterial({
-      uniforms: {
-        uProgress: { value: 0 },
-        uColor: { value: new THREE.Color(0xffffff) },
-      },
-      vertexShader: drawInVertexShader,
-      fragmentShader: drawInFragmentShader,
-      transparent: true,
-      depthWrite: false,
-    })
 
     obj.traverse((child) => {
       if (child instanceof THREE.Line || child instanceof THREE.LineSegments) {
-        const idx = prepareGeometry(child.geometry as THREE.BufferGeometry)
-        const mat = makeMaterial()
-        child.material = mat
-        result[idx].push(mat)
+        const posAttr = (child.geometry as THREE.BufferGeometry).getAttribute('position')
+        let cx = 0
+        for (let i = 0; i < posAttr.count; i++) cx += posAttr.getX(i)
+        child.material = materials[getLetterIdx(cx / posAttr.count)]
       } else if (child instanceof THREE.Mesh) {
         const edges = new THREE.EdgesGeometry(child.geometry)
-        const idx = prepareGeometry(edges)
-        const mat = makeMaterial()
-        const lineSegs = new THREE.LineSegments(edges, mat)
+        const posAttr = edges.getAttribute('position')
+        let cx = 0
+        for (let i = 0; i < posAttr.count; i++) cx += posAttr.getX(i)
+        const lineSegs = new THREE.LineSegments(edges, materials[getLetterIdx(cx / posAttr.count)])
         child.parent?.add(lineSegs)
         child.visible = false
-        result[idx].push(mat)
       }
     })
 
-    return result
+    return materials
   }, [obj])
 
   useFrame(() => {
@@ -151,9 +125,7 @@ function BitRichModel({ speedsRef }: { speedsRef: React.MutableRefObject<number[
     for (let i = 0; i < NUM_LETTERS; i++) {
       letterProgress.current[i] = Math.min(letterProgress.current[i] + speedsRef.current[i], 1)
       const eased = 1 - Math.pow(1 - letterProgress.current[i], 2)
-      for (const mat of letterMaterials[i]) {
-        mat.uniforms.uProgress.value = eased
-      }
+      letterMaterials[i].uniforms.uProgress.value = eased
     }
   })
 
