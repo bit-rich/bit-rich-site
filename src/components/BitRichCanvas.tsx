@@ -133,8 +133,14 @@ function buildLetterObjects(obj: THREE.Object3D) {
     }
 
     const seed = posMap.get(seedKey)!
-    const edgeLengths = sortedEdges.map(([a, b]) => posMap.get(a)!.distanceTo(posMap.get(b)!))
-    const totalLength = edgeLengths.reduce((s, l) => s + l, 0)
+    const isDepth = ([a, b]: [string, string]) => Math.abs(posMap.get(a)!.z - posMap.get(b)!.z) > 0.1
+    const faceEdges = sortedEdges.filter(e => !isDepth(e))
+    const depthEdges = sortedEdges.filter(isDepth)
+
+    // Face edges fill progress 0→0.99, depth edges snap in over 0.99→1.0
+    const DEPTH_START = 0.99
+    const faceTotal = faceEdges.reduce((s, [a, b]) => s + posMap.get(a)!.distanceTo(posMap.get(b)!), 0)
+    const depthTotal = depthEdges.reduce((s, [a, b]) => s + posMap.get(a)!.distanceTo(posMap.get(b)!), 0)
 
     const positions: number[] = []
     const revealStarts: number[] = []
@@ -143,11 +149,8 @@ function buildLetterObjects(obj: THREE.Object3D) {
     const tipData: EdgeTip[] = []
     let cursor = 0
 
-    sortedEdges.forEach(([a, b], i) => {
+    const addEdge = (a: string, b: string, revealStart: number, slot: number) => {
       const va = posMap.get(a)!, vb = posMap.get(b)!
-      const slot = edgeLengths[i] / totalLength
-      const revealStart = cursor
-      cursor += slot
       const aIsNear = va.distanceTo(seed) <= vb.distanceTo(seed)
       const [near, far] = aIsNear ? [va, vb] : [vb, va]
       positions.push(near.x, near.y, near.z, far.x, far.y, far.z)
@@ -155,7 +158,17 @@ function buildLetterObjects(obj: THREE.Object3D) {
       edgeSlots.push(slot, slot)
       localTs.push(0, 1)
       tipData.push({ near, far, revealStart, slot })
+    }
+
+    faceEdges.forEach(([a, b]) => {
+      const len = posMap.get(a)!.distanceTo(posMap.get(b)!)
+      const slot = (len / faceTotal) * DEPTH_START
+      addEdge(a, b, cursor, slot)
+      cursor += slot
     })
+
+    // depth edges all pop in at the very end
+    depthEdges.forEach(([a, b]) => addEdge(a, b, DEPTH_START, 1 - DEPTH_START))
 
     const geo = new THREE.BufferGeometry()
     geo.setAttribute('position', new THREE.BufferAttribute(new Float32Array(positions), 3))
@@ -202,7 +215,7 @@ function BitRichModel({ speedsRef }: { speedsRef: React.MutableRefObject<number[
     tipGeo.setAttribute('position', new THREE.BufferAttribute(tipPositions, 3))
 
     const tipMat = new THREE.PointsMaterial({
-      size: 0.08,
+      size: 0.03,
       map: makeGlowTexture(),
       transparent: true,
       blending: THREE.AdditiveBlending,
