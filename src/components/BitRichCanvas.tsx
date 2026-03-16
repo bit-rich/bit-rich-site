@@ -6,8 +6,9 @@ import { OBJLoader } from 'three/examples/jsm/loaders/OBJLoader'
 import { useRef, useMemo } from 'react'
 import * as THREE from 'three'
 
-const INITIAL_ROTATION_X = Math.PI * 0.08
-const INITIAL_ROTATION_Y = Math.PI * 0.15
+const INITIAL_ROTATION_X = Math.PI * 0.18
+const INITIAL_ROTATION_Y = Math.PI * 0.22
+const INITIAL_SCALE = 1.4
 const DEFAULT_SPEED = 0.0025
 const DEPTH_START = 0.985
 
@@ -204,7 +205,7 @@ function buildLetterObjects(obj: THREE.Object3D) {
   })
 }
 
-function BitRichModel({ speedsRef }: { speedsRef: React.MutableRefObject<number[]> }) {
+function BitRichModel({ speedsRef, debugRef }: { speedsRef: React.MutableRefObject<number[]>; debugRef: React.MutableRefObject<HTMLDivElement | null> }) {
   const groupRef = useRef<THREE.Group>(null)
   const obj = useLoader(OBJLoader, '/bitrich_wireframe.obj') as THREE.Object3D
   const initialized = useRef(false)
@@ -225,14 +226,23 @@ function BitRichModel({ speedsRef }: { speedsRef: React.MutableRefObject<number[
     return { letters, tipPoints: new THREE.Points(tipGeo, tipMat), tipPositions }
   }, [obj])
 
-  useFrame(() => {
+  useFrame(({ viewport, camera }) => {
     const g = groupRef.current
     if (!g) return
 
     if (!initialized.current) {
       g.rotation.x = INITIAL_ROTATION_X
       g.rotation.y = INITIAL_ROTATION_Y
+      g.scale.setScalar(INITIAL_SCALE)
       initialized.current = true
+    }
+
+    g.position.set(-viewport.width * 0.08, viewport.height * 0.37, 0)
+
+    if (debugRef.current) {
+      const p = camera.position
+      const r = camera.rotation
+      debugRef.current.textContent = `cam pos: ${p.x.toFixed(2)}, ${p.y.toFixed(2)}, ${p.z.toFixed(2)}  |  cam rot: ${r.x.toFixed(3)}, ${r.y.toFixed(3)}, ${r.z.toFixed(3)}`
     }
 
     letters.forEach(({ mat, getTip }, i) => {
@@ -265,13 +275,15 @@ function BitRichModel({ speedsRef }: { speedsRef: React.MutableRefObject<number[
 
 export default function BitRichCanvas() {
   const speedsRef = useRef(new Array(10).fill(DEFAULT_SPEED))
+  const debugRef = useRef<HTMLDivElement | null>(null)
 
   return (
     <div className="w-screen h-screen">
       <Canvas camera={{ position: [0, 0, 5] }} gl={{ antialias: true }}>
-        <BitRichModel speedsRef={speedsRef} />
+        <BitRichModel speedsRef={speedsRef} debugRef={debugRef} />
         <OrbitControls enableZoom={false} enablePan={false} />
       </Canvas>
+      <div ref={debugRef} className="absolute bottom-4 left-4 text-white font-mono text-sm pointer-events-none" />
     </div>
   )
 }
