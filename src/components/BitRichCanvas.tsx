@@ -29,53 +29,54 @@ const fragmentShader = `
   }
 `
 
-type LetterRegion = { minX: number; maxX: number; seed: THREE.Vector3; maxDist: number; mat: THREE.ShaderMaterial }
+// Union-Find to group vertices into connected components (one per letter)
+function buildComponents(obj: THREE.Object3D) {
+  const parent = new Map<string, string>()
 
-function buildLetterRegions(allPositions: THREE.Vector3[]): LetterRegion[] {
-  // Sort all X values and find gaps between letters
-  const sortedX = allPositions.map(p => p.x).sort((a, b) => a - b)
+  const key = (x: number, y: number, z: number) => `${x.toFixed(4)},${y.toFixed(4)},${z.toFixed(4)}`
 
-  const gaps: { pos: number; size: number }[] = []
-  for (let i = 1; i < sortedX.length; i++) {
-    const size = sortedX[i] - sortedX[i - 1]
-    if (size > 0) gaps.push({ pos: (sortedX[i] + sortedX[i - 1]) / 2, size })
+  const find = (k: string): string => {
+    if (!parent.has(k)) parent.set(k, k)
+    if (parent.get(k) !== k) parent.set(k, find(parent.get(k)!))
+    return parent.get(k)!
   }
 
-  // Letter gaps are much larger than within-letter gaps
-  const meanGap = gaps.reduce((s, g) => s + g.size, 0) / gaps.length
-  const separators = gaps
-    .filter(g => g.size > meanGap * 5)
-    .map(g => g.pos)
-    .sort((a, b) => a - b)
+  const union = (a: string, b: string) => parent.set(find(a), find(b))
 
-  // Build X ranges for each letter
-  const bounds = [
-    -Infinity,
-    ...separators,
-    Infinity,
-  ]
+  const positions = new Map<string, THREE.Vector3>()
 
-  return bounds.slice(0, -1).map((minX, i) => {
-    const maxX = bounds[i + 1]
-    const verts = allPositions.filter(p => p.x > minX && p.x <= maxX)
+  obj.traverse((child) => {
+    if (!(child instanceof THREE.Line) && !(child instanceof THREE.LineSegments)) return
+    const posAttr = (child.geometry as THREE.BufferGeometry).getAttribute('position')
 
-    // First vertex as seed
-    const seed = verts[0]?.clone() ?? new THREE.Vector3()
-    const maxDist = verts.reduce((m, v) => Math.max(m, v.distanceTo(seed)), 0) || 1
+    for (let i = 0; i < posAttr.count; i++) {
+      const k = key(posAttr.getX(i), posAttr.getY(i), posAttr.getZ(i))
+      positions.set(k, new THREE.Vector3(posAttr.getX(i), posAttr.getY(i), posAttr.getZ(i)))
+    }
 
-    const mat = new THREE.ShaderMaterial({
-      uniforms: {
-        uProgress: { value: 0 },
-        uSeed: { value: seed },
-        uMaxDist: { value: maxDist },
-      },
-      vertexShader,
-      fragmentShader,
-      transparent: true,
-      depthWrite: false,
-    })
+    // Line = polyline (edges between consecutive vertices)
+    // LineSegments = discrete pairs
+    const step = child instanceof THREE.LineSegments ? 2 : 1
+    for (let i = 0; i < posAttr.count - 1; i += step) {
+      union(
+        key(posAttr.getX(i), posAttr.getY(i), posAttr.getZ(i)),
+        key(posAttr.getX(i + 1), posAttr.getY(i + 1), posAttr.getZ(i + 1)),
+      )
+    }
+  })
 
-    return { minX, maxX, seed, maxDist, mat }
+  // Group vertices by component root
+  const components = new Map<string, THREE.Vector3[]>()
+  for (const [k, v] of positions) {
+    const root = find(k)
+    if (!components.has(root)) components.set(root, [])
+    components.get(root)!.push(v)
+  }
+
+  // Sort components left-to-right by min X so sliders match letter order
+  return [...components.values()].sort((a, b) => {
+    const minX = (verts: THREE.Vector3[]) => Math.min(...verts.map(v => v.x))
+    return minX(a) - minX(b)
   })
 }
 
@@ -85,44 +86,45 @@ function BitRichModel({ speedsRef }: { speedsRef: React.MutableRefObject<number[
   const initialized = useRef(false)
   const letterProgress = useRef<number[]>([])
 
-  const regions = useMemo(() => {
-    // Collect all vertex positions
-    const allPositions: THREE.Vector3[] = []
-    obj.traverse((child) => {
-      if (child instanceof THREE.Line || child instanceof THREE.LineSegments || child instanceof THREE.Mesh) {
-        const posAttr = (child.geometry as THREE.BufferGeometry).getAttribute('position')
-        for (let i = 0; i < posAttr.count; i++) {
-          allPositions.push(new THREE.Vector3(posAttr.getX(i), posAttr.getY(i), posAttr.getZ(i)))
-        }
-      }
+  const { materials, numLetters } = useMemo(() => {
+    const components = buildComponents(obj)
+
+    // One material per connected component (letter/dash)
+    const materials = components.map((verts) => {
+      const seed = verts[0]
+      const maxDist = verts.reduce((m, v) => Math.max(m, v.distanceTo(seed)), 0) || 1
+      return new THREE.ShaderMaterial({
+        uniforms: {
+          uProgress: { value: 0 },
+          uSeed: { value: seed.clone() },
+          uMaxDist: { value: maxDist },
+        },
+        vertexShader,
+        fragmentShader,
+        transparent: true,
+        depthWrite: false,
+      })
     })
 
-    const regions = buildLetterRegions(allPositions)
-    letterProgress.current = new Array(regions.length).fill(0)
+    letterProgress.current = new Array(materials.length).fill(0)
 
-    const getMat = (centroidX: number) => {
-      const r = regions.find(r => centroidX > r.minX && centroidX <= r.maxX)
-      return r?.mat ?? regions[regions.length - 1].mat
-    }
+    // Build lookup: vertex key → material index
+    const keyToMat = new Map<string, THREE.ShaderMaterial>()
+    const key = (x: number, y: number, z: number) => `${x.toFixed(4)},${y.toFixed(4)},${z.toFixed(4)}`
+    components.forEach((verts, i) => {
+      for (const v of verts) keyToMat.set(key(v.x, v.y, v.z), materials[i])
+    })
 
+    // Assign each geometry's material by its first vertex
     obj.traverse((child) => {
       if (child instanceof THREE.Line || child instanceof THREE.LineSegments) {
         const posAttr = (child.geometry as THREE.BufferGeometry).getAttribute('position')
-        let cx = 0
-        for (let i = 0; i < posAttr.count; i++) cx += posAttr.getX(i)
-        child.material = getMat(cx / posAttr.count)
-      } else if (child instanceof THREE.Mesh) {
-        const edges = new THREE.EdgesGeometry(child.geometry)
-        const posAttr = edges.getAttribute('position')
-        let cx = 0
-        for (let i = 0; i < posAttr.count; i++) cx += posAttr.getX(i)
-        const lineSegs = new THREE.LineSegments(edges, getMat(cx / posAttr.count))
-        child.parent?.add(lineSegs)
-        child.visible = false
+        const k = key(posAttr.getX(0), posAttr.getY(0), posAttr.getZ(0))
+        child.material = keyToMat.get(k) ?? materials[0]
       }
     })
 
-    return regions
+    return { materials, numLetters: materials.length }
   }, [obj])
 
   useFrame(() => {
@@ -135,10 +137,10 @@ function BitRichModel({ speedsRef }: { speedsRef: React.MutableRefObject<number[
       initialized.current = true
     }
 
-    regions.forEach((r, i) => {
-      const speed = speedsRef.current[i] ?? speedsRef.current[0]
+    materials.forEach((mat, i) => {
+      const speed = speedsRef.current[i] ?? DEFAULT_SPEED
       letterProgress.current[i] = Math.min(letterProgress.current[i] + speed, 1)
-      r.mat.uniforms.uProgress.value = letterProgress.current[i]
+      mat.uniforms.uProgress.value = letterProgress.current[i]
     })
   })
 
@@ -152,7 +154,7 @@ function BitRichModel({ speedsRef }: { speedsRef: React.MutableRefObject<number[
 }
 
 export default function BitRichCanvas() {
-  const [speeds, setSpeeds] = useState<number[]>(new Array(8).fill(DEFAULT_SPEED))
+  const [speeds, setSpeeds] = useState<number[]>(new Array(10).fill(DEFAULT_SPEED))
   const speedsRef = useRef(speeds)
   speedsRef.current = speeds
 
@@ -169,10 +171,7 @@ export default function BitRichCanvas() {
           <div key={i} className="flex items-center gap-3">
             <span className="w-4 text-center">{i + 1}</span>
             <input
-              type="range"
-              min={0}
-              max={0.005}
-              step={0.0001}
+              type="range" min={0} max={0.005} step={0.0001}
               value={spd}
               onChange={e => {
                 const next = [...speeds]
