@@ -9,6 +9,7 @@ import * as THREE from 'three'
 const INITIAL_ROTATION_X = Math.PI * 0.08
 const INITIAL_ROTATION_Y = Math.PI * 0.15
 const DEFAULT_SPEED = 0.0025
+const DEPTH_START = 0.985
 
 const vertexShader = `
   attribute float aRevealStart;
@@ -17,11 +18,13 @@ const vertexShader = `
   varying float vRevealStart;
   varying float vEdgeSlot;
   varying float vLocalT;
+  uniform float uDepthProgress;
   void main() {
     vRevealStart = aRevealStart;
     vEdgeSlot = aEdgeSlot;
     vLocalT = aLocalT;
-    gl_Position = projectionMatrix * modelViewMatrix * vec4(position, 1.0);
+    vec3 pos = vec3(position.xy, position.z * uDepthProgress);
+    gl_Position = projectionMatrix * modelViewMatrix * vec4(pos, 1.0);
   }
 `
 
@@ -133,14 +136,18 @@ function buildLetterObjects(obj: THREE.Object3D) {
     }
 
     const seed = posMap.get(seedKey)!
-    const isDepth = ([a, b]: [string, string]) => Math.abs(posMap.get(a)!.z - posMap.get(b)!.z) > 0.1
-    const faceEdges = sortedEdges.filter(e => !isDepth(e))
+    const zOf = (k: string) => posMap.get(k)!.z
+    const isFront = ([a, b]: [string, string]) => zOf(a) < 0.1 && zOf(b) < 0.1
+    const isBack  = ([a, b]: [string, string]) => zOf(a) > 0.1 && zOf(b) > 0.1
+    const isDepth = ([a, b]: [string, string]) => !isFront([a,b]) && !isBack([a,b])
+
+    const frontEdges = sortedEdges.filter(isFront)
+    const backEdges  = sortedEdges.filter(isBack)
     const depthEdges = sortedEdges.filter(isDepth)
 
-    // Face edges fill progress 0→0.99, depth edges snap in over 0.99→1.0
-    const DEPTH_START = 0.99
-    const faceTotal = faceEdges.reduce((s, [a, b]) => s + posMap.get(a)!.distanceTo(posMap.get(b)!), 0)
-    const depthTotal = depthEdges.reduce((s, [a, b]) => s + posMap.get(a)!.distanceTo(posMap.get(b)!), 0)
+    // Front edges animate 0→DEPTH_START, back+depth pop in together at DEPTH_START
+    const faceTotal = frontEdges.reduce((s, [a, b]) => s + posMap.get(a)!.distanceTo(posMap.get(b)!), 0)
+    const depthTotal = [...backEdges, ...depthEdges].reduce((s, [a, b]) => s + posMap.get(a)!.distanceTo(posMap.get(b)!), 0)
 
     const positions: number[] = []
     const revealStarts: number[] = []
@@ -160,15 +167,14 @@ function buildLetterObjects(obj: THREE.Object3D) {
       tipData.push({ near, far, revealStart, slot })
     }
 
-    faceEdges.forEach(([a, b]) => {
-      const len = posMap.get(a)!.distanceTo(posMap.get(b)!)
-      const slot = (len / faceTotal) * DEPTH_START
+    frontEdges.forEach(([a, b]) => {
+      const slot = (posMap.get(a)!.distanceTo(posMap.get(b)!) / faceTotal) * DEPTH_START
       addEdge(a, b, cursor, slot)
       cursor += slot
     })
 
-    // depth edges all pop in at the very end
-    depthEdges.forEach(([a, b]) => addEdge(a, b, DEPTH_START, 1 - DEPTH_START))
+    // back face + depth edges all pop in together at DEPTH_START
+    ;[...backEdges, ...depthEdges].forEach(([a, b]) => addEdge(a, b, DEPTH_START, 1 - DEPTH_START))
 
     const geo = new THREE.BufferGeometry()
     geo.setAttribute('position', new THREE.BufferAttribute(new Float32Array(positions), 3))
@@ -177,7 +183,7 @@ function buildLetterObjects(obj: THREE.Object3D) {
     geo.setAttribute('aLocalT', new THREE.BufferAttribute(new Float32Array(localTs), 1))
 
     const mat = new THREE.ShaderMaterial({
-      uniforms: { uProgress: { value: 0 } },
+      uniforms: { uProgress: { value: 0 }, uDepthProgress: { value: 0 } },
       vertexShader,
       fragmentShader,
       transparent: true,
@@ -240,6 +246,7 @@ function BitRichModel({ speedsRef }: { speedsRef: React.MutableRefObject<number[
       rawProgress.current[i] = Math.min(rawProgress.current[i] + speed, 1)
       const eased = easeInOut(rawProgress.current[i])
       mat.uniforms.uProgress.value = eased
+      mat.uniforms.uDepthProgress.value = Math.min(Math.max((eased - DEPTH_START) / (1 - DEPTH_START), 0), 1)
 
       // Update tip position
       const tip = getTip(eased)
