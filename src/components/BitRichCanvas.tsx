@@ -43,7 +43,7 @@ const fragmentShader = `
 
 const pkey = (x: number, y: number, z: number) => `${x.toFixed(4)},${y.toFixed(4)},${z.toFixed(4)}`
 
-// Smooth ease in-out
+// Smooth ease in-out and its derivative (speed), normalized 0-1
 const easeInOut = (t: number) => t < 0.5 ? 2 * t * t : 1 - Math.pow(-2 * t + 2, 2) / 2
 
 // Glow texture for the tip point
@@ -138,11 +138,11 @@ function buildLetterObjects(obj: THREE.Object3D) {
     const seed = posMap.get(seedKey)!
     const zOf = (k: string) => posMap.get(k)!.z
     const isFront = ([a, b]: [string, string]) => zOf(a) < 0.1 && zOf(b) < 0.1
-    const isBack  = ([a, b]: [string, string]) => zOf(a) > 0.1 && zOf(b) > 0.1
-    const isDepth = ([a, b]: [string, string]) => !isFront([a,b]) && !isBack([a,b])
+    const isBack = ([a, b]: [string, string]) => zOf(a) > 0.1 && zOf(b) > 0.1
+    const isDepth = ([a, b]: [string, string]) => !isFront([a, b]) && !isBack([a, b])
 
     const frontEdges = sortedEdges.filter(isFront)
-    const backEdges  = sortedEdges.filter(isBack)
+    const backEdges = sortedEdges.filter(isBack)
     const depthEdges = sortedEdges.filter(isDepth)
 
     // Front edges animate 0→DEPTH_START, back+depth pop in together at DEPTH_START
@@ -158,13 +158,12 @@ function buildLetterObjects(obj: THREE.Object3D) {
 
     const addEdge = (a: string, b: string, revealStart: number, slot: number) => {
       const va = posMap.get(a)!, vb = posMap.get(b)!
-      const aIsNear = va.distanceTo(seed) <= vb.distanceTo(seed)
-      const [near, far] = aIsNear ? [va, vb] : [vb, va]
-      positions.push(near.x, near.y, near.z, far.x, far.y, far.z)
+      // Use DFS edge direction (a→b) directly — a is already-visited, b is newly discovered
+      positions.push(va.x, va.y, va.z, vb.x, vb.y, vb.z)
       revealStarts.push(revealStart, revealStart)
       edgeSlots.push(slot, slot)
       localTs.push(0, 1)
-      tipData.push({ near, far, revealStart, slot })
+      tipData.push({ near: va, far: vb, revealStart, slot })
     }
 
     frontEdges.forEach(([a, b]) => {
@@ -173,8 +172,8 @@ function buildLetterObjects(obj: THREE.Object3D) {
       cursor += slot
     })
 
-    // back face + depth edges all pop in together at DEPTH_START
-    ;[...backEdges, ...depthEdges].forEach(([a, b]) => addEdge(a, b, DEPTH_START, 1 - DEPTH_START))
+      // back face + depth edges all pop in together at DEPTH_START
+      ;[...backEdges, ...depthEdges].forEach(([a, b]) => addEdge(a, b, DEPTH_START, 1 - DEPTH_START))
 
     const geo = new THREE.BufferGeometry()
     geo.setAttribute('position', new THREE.BufferAttribute(new Float32Array(positions), 3))
@@ -201,7 +200,7 @@ function buildLetterObjects(obj: THREE.Object3D) {
       return tipData[tipData.length - 1]?.far.clone() ?? new THREE.Vector3()
     }
 
-    return { lineSegs: new THREE.LineSegments(geo, mat), mat, getTip }
+    return { lineSegs: new THREE.LineSegments(geo, mat), mat, getTip, tipData }
   })
 }
 
@@ -215,17 +214,12 @@ function BitRichModel({ speedsRef }: { speedsRef: React.MutableRefObject<number[
     const letters = buildLetterObjects(obj)
     rawProgress.current = new Array(letters.length).fill(0)
 
-    // One point per letter for the glowing tip
     const tipPositions = new Float32Array(letters.length * 3)
     const tipGeo = new THREE.BufferGeometry()
     tipGeo.setAttribute('position', new THREE.BufferAttribute(tipPositions, 3))
-
     const tipMat = new THREE.PointsMaterial({
-      size: 0.03,
-      map: makeGlowTexture(),
-      transparent: true,
-      blending: THREE.AdditiveBlending,
-      depthWrite: false,
+      size: 0.03, map: makeGlowTexture(), transparent: true,
+      blending: THREE.AdditiveBlending, depthWrite: false,
     })
 
     return { letters, tipPoints: new THREE.Points(tipGeo, tipMat), tipPositions }
@@ -248,7 +242,6 @@ function BitRichModel({ speedsRef }: { speedsRef: React.MutableRefObject<number[
       mat.uniforms.uProgress.value = eased
       mat.uniforms.uDepthProgress.value = Math.min(Math.max((eased - DEPTH_START) / (1 - DEPTH_START), 0), 1)
 
-      // Update tip position
       const tip = getTip(eased)
       tipPositions[i * 3] = tip.x
       tipPositions[i * 3 + 1] = tip.y
@@ -275,8 +268,7 @@ export default function BitRichCanvas() {
 
   return (
     <div className="w-screen h-screen">
-      <Canvas camera={{ position: [0, 0, 5] }}>
-        <ambientLight intensity={0.6} />
+      <Canvas camera={{ position: [0, 0, 5] }} gl={{ antialias: true }}>
         <BitRichModel speedsRef={speedsRef} />
         <OrbitControls enableZoom={false} enablePan={false} />
       </Canvas>
